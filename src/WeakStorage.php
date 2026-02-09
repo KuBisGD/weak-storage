@@ -5,9 +5,14 @@ declare(strict_types=1);
 namespace Ewn;
 
 use ArrayAccess;
+use ArrayIterator;
+use Countable;
 use Generator;
 use InvalidArgumentException;
+use IteratorAggregate;
 use Override;
+use ReflectionClass;
+use Traversable;
 use WeakMap;
 use WeakReference;
 
@@ -17,8 +22,9 @@ use WeakReference;
  * @template TKey of string|int
  * @template TValue of object
  * @implements ArrayAccess<TKey, TValue>
+ * @implements IteratorAggregate<TKey, WeakReference<TValue>>
  */
-final class WeakStorage implements ArrayAccess
+final class WeakStorage implements ArrayAccess, Countable, IteratorAggregate
 {
     /**
      * Send to **Generator** to remove current object.
@@ -30,25 +36,25 @@ final class WeakStorage implements ArrayAccess
      */
     public int $size {
         get {
-            return count($this->_internalCache);
+            return count($this->storage);
         }
     }
 
     /**
-     * An array that stores a **WeakReference**.
+     * The array that stores all **WeakReferences**.
      *
      * @var array<TKey, WeakReference<TValue>>
      */
-    private array $_internalCache = [];
+    private array $storage = [];
 
     /**
      * @var WeakMap<TValue, array<int|string, mixed>>
      */
-    private WeakMap $_internalData;
+    private WeakMap $weakMap;
 
     public function __construct()
     {
-        $this->_internalData = new WeakMap;
+        $this->weakMap = new WeakMap;
     }
 
     /**
@@ -64,9 +70,27 @@ final class WeakStorage implements ArrayAccess
      * @param  TKey  $name  Property name.
      * @param  TValue  $value  Object to cache.
      */
-    public function __set(string|int $name, object $value)
+    public function __set(string|int $name, object $value): void
     {
         $this->set($name, $value);
+    }
+
+    /**
+     * @param TKey $name Property name.
+     * @return bool If property is set.
+     */
+    public function __isset(string|int $name): bool
+    {
+        return isset($this->storage[$name]);
+    }
+
+    /**
+     * @param TKey $name Property to unset.
+     * @return void
+     */
+    public function __unset(string|int $name): void
+    {
+        unset($this->storage[$name]);
     }
 
     /**
@@ -76,7 +100,7 @@ final class WeakStorage implements ArrayAccess
      */
     public function __debugInfo(): array
     {
-        return $this->_internalCache;
+        return $this->storage;
     }
 
     /**
@@ -87,10 +111,10 @@ final class WeakStorage implements ArrayAccess
      */
     public function get(string|int $ident): ?object
     {
-        $ref = ($this->_internalCache[$ident] ?? null)?->get();
+        $ref = ($this->storage[$ident] ?? null)?->get();
 
         if ($ref === null && $this->exists($ident)) {
-            unset($this->_internalCache[$ident]);
+            unset($this->storage[$ident]);
         }
 
         return $ref;
@@ -104,7 +128,7 @@ final class WeakStorage implements ArrayAccess
      */
     public function getWeak(string|int $ident): ?WeakReference
     {
-        return $this->_internalCache[$ident] ?? null;
+        return $this->storage[$ident] ?? null;
     }
 
     /**
@@ -119,7 +143,7 @@ final class WeakStorage implements ArrayAccess
             $value = $this->get($value);
         }
 
-        return $this->_internalData[$value] ?? [];
+        return $this->weakMap[$value] ?? [];
     }
 
     /**
@@ -131,25 +155,27 @@ final class WeakStorage implements ArrayAccess
      */
     public function set(string|int $ident, object $object, ?array $data = null): void
     {
-        $this->_internalCache[$ident] = WeakReference::create($object);
+        $this->storage[$ident] = WeakReference::create($object);
 
         if ($data !== null) {
-            $this->_internalData[$object] = $data;
+            $this->weakMap[$object] = $data;
         }
     }
 
     /**
+     * Removes an object from the storage and returns it.
+     * 
      * @param  TKey  $ident
-     * @return null|TValue Removed object or null
+     * @return null|TValue Removed object or null.
      */
     public function remove(string|int $ident): ?object
     {
-        if (! isset($this->_internalCache[$ident])) {
+        if (! isset($this->storage[$ident])) {
             return null;
         }
 
         $object = $this->get($ident);
-        unset($this->_internalCache[$ident]);
+        unset($this->storage[$ident]);
 
         return $object;
     }
@@ -159,27 +185,11 @@ final class WeakStorage implements ArrayAccess
      */
     public function clean(): void
     {
-        foreach ($this->_internalCache as $ident => $WeakReference) {
+        foreach ($this->storage as $ident => $WeakReference) {
             if ($WeakReference->get() === null) {
-                unset($this->_internalCache[$ident]);
+                unset($this->storage[$ident]);
             }
         }
-    }
-
-    /**
-     * Count all references that are not null.
-     */
-    public function countValid(): int
-    {
-        $count = 0;
-
-        foreach ($this->_internalCache as $weakRef) {
-            if ($weakRef->get() !== null) {
-                $count++;
-            }
-        }
-
-        return $count;
     }
 
     /**
@@ -189,7 +199,7 @@ final class WeakStorage implements ArrayAccess
      */
     public function exists(string|int $ident): bool
     {
-        return isset($this->_internalCache[$ident]);
+        return isset($this->storage[$ident]);
     }
 
     /**
@@ -199,7 +209,7 @@ final class WeakStorage implements ArrayAccess
      */
     public function valid(string|int $ident): bool
     {
-        return ($this->_internalCache[$ident] ?? null)?->get() !== null;
+        return ($this->storage[$ident] ?? null)?->get() !== null;
     }
 
     /**
@@ -207,7 +217,7 @@ final class WeakStorage implements ArrayAccess
      */
     public function createGenerator(): Generator
     {
-        foreach ($this->_internalCache as $ident => $weakRef) {
+        foreach ($this->storage as $ident => $weakRef) {
             $return = yield $ident => $weakRef->get();
 
             switch ($return) {
@@ -270,6 +280,35 @@ final class WeakStorage implements ArrayAccess
     #[Override]
     public function offsetUnset(mixed $offset): void
     {
-        unset($this->_internalCache[$offset]);
+        unset($this->storage[$offset]);
+    }
+    
+    /**
+     * Counts the amount of WeakReferences that still contains a reference.
+     *
+     * @return int<0, max> Sum of references.
+     */
+    #[Override]
+    public function count(): int
+    {
+        $count = 0;
+        foreach ($this->storage as $weakRef) {
+            if ($weakRef->get() !== null) {
+                $count++;
+            }
+        }
+
+        return $count;
+    }
+    
+    /**
+     * Retrieve an external iterator.
+     *
+     * @return Traversable<TKey, WeakReference<TValue>>
+     */
+    #[Override]
+    public function getIterator(): Traversable
+    {
+        return new ArrayIterator($this->storage);
     }
 }
