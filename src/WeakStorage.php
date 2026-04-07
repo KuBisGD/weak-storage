@@ -231,7 +231,7 @@ final class WeakStorage implements ArrayAccess, Countable, IteratorAggregate
     }
     
     /**
-     * Whether a offset exists
+     * Whether an offset exists
      *
      * @param TKey $offset
      * @return boolean
